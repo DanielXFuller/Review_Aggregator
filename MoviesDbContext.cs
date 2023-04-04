@@ -13,6 +13,8 @@ namespace Review_Aggregator
 
         public DbSet<Review> Reviews { get; set; }
 
+        public DbSet<Website> Websites { get; set; }
+
 
         public MoviesDbContext() : base(new DbContextOptionsBuilder<MoviesDbContext>().UseSqlite("Data Source=Movies.db").Options)
         {

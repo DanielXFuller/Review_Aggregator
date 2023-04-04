@@ -8,6 +8,7 @@ using static System.Net.WebRequestMethods;
 using System.Xml.Linq;
 using Microsoft.EntityFrameworkCore;
 using System.Net;
+using System;
 
 namespace Review_Aggregator
 {
@@ -28,7 +29,8 @@ namespace Review_Aggregator
                 Console.WriteLine("2. Read Movies from the database");
                 Console.WriteLine("3. Update existing Movie in the database");
                 Console.WriteLine("4. Delete Movie from the database");
-                Console.WriteLine("5. Exit the program");
+                Console.WriteLine("5. Handle Website Actions");
+                Console.WriteLine("6. Exit Program");
 
 
                 Console.Write("Enter the number of the action you would like to perform: ");
@@ -54,17 +56,20 @@ namespace Review_Aggregator
                             Delete(id);
                             break;
                         case 5:
+                            HandleWebsiteActions();
+                            break;
+                        case 6:
                             exitProgram = true;
                             Console.WriteLine("Exiting the program...");
                             break;
                         default:
-                            Console.WriteLine("Invalid option selected. Please choose a number between 1 and 5.");
+                            Console.WriteLine("Invalid option selected. Please choose a number between 1 and 6.");
                             break;
                     }
                 }
                 else
                 {
-                    Console.WriteLine("Invalid input entered. Please enter a number between 1 and 5.");
+                    Console.WriteLine("Invalid input entered. Please enter a number between 1 and 6.");
                 }
 
                 // Add a blank line for spacing
@@ -444,102 +449,231 @@ namespace Review_Aggregator
         public static string GetMovieUrl(string movieName, string websiteName, ChromeDriver driver)
         {
 
-            string website;
-            string url;
-            if (websiteName.ToLower() == "imdb")
+            using (var db = new MoviesDbContext())
             {
-                website = "imdb";
-            }
-            else if (websiteName.ToLower() == "rotten tomatoes")
-            {
-                website = "rotten tomatoes";
-            }
-            else
-            {
-                throw new ArgumentException($"Website name {websiteName} is not supported.");
-            }
-            string baseUrl = "http://www.google.com/search?q=";
-            driver.Navigate().GoToUrl(baseUrl + website + " " + movieName);
+                string url;
+                var website = db.Websites.SingleOrDefault(w => w.Name.ToLower() == websiteName.ToLower());
 
-
-
-            IList<IWebElement> titles = driver.FindElements(By.CssSelector("h3.LC20lb.MBeuO.DKV0Md"));
-            var length = 0;
-
-            for (int i = 0; i < titles.Count; i++)
-            {
-                if (string.IsNullOrEmpty(titles[i].Text))
+                if (website == null)
                 {
-                    break;
+                    throw new ArgumentException($"Website name {websiteName} is not supported.");
                 }
 
-                Console.WriteLine((i + 1) + ". " + titles[i].Text);
-                length += 1;
+                string baseUrl = "http://www.google.com/search?q=";
+                driver.Navigate().GoToUrl(baseUrl + website.Name + " " + movieName);
+
+
+
+                IList<IWebElement> titles = driver.FindElements(By.CssSelector("h3.LC20lb.MBeuO.DKV0Md"));
+                var length = 0;
+
+                for (int i = 0; i < titles.Count; i++)
+                {
+                    if (string.IsNullOrEmpty(titles[i].Text))
+                    {
+                        break;
+                    }
+
+                    Console.WriteLine((i + 1) + ". " + titles[i].Text);
+                    length += 1;
+                }
+
+                IList<IWebElement> links = driver.FindElements(By.CssSelector("div.yuRUbf a"));
+                if (links.Count > length)
+                {
+                    links = links.Take(length).ToList();
+                }
+
+                while (true)
+                {
+                    Console.Write("Enter the number of the link you want to select: ");
+                    if (int.TryParse(Console.ReadLine(), out int linkNumber))
+                    {
+                        if (linkNumber > 0 && linkNumber <= links.Count)
+                        {
+                            url = links[linkNumber - 1].GetAttribute("href");
+                            return url;
+                        }
+                    }
+                    Console.WriteLine("Invalid link number. Please try again.");
+                }
+
             }
 
-            IList<IWebElement> links = driver.FindElements(By.CssSelector("div.yuRUbf a"));
-            if (links.Count > length)
-            {
-                links = links.Take(length).ToList();
-            }
 
-            while (true)
+        }
+
+        public static Movie GetStructuredDataJson(string url, string websiteName, ChromeDriver driver)
+        {
+            using (var db = new MoviesDbContext())
             {
-                Console.Write("Enter the number of the link you want to select: ");
+                var website = db.Websites.SingleOrDefault(w => w.Name.ToLower() == websiteName.ToLower());
+
+                if (website == null)
+                {
+                    throw new ArgumentException($"Website name {websiteName} is not supported.");
+                }
+
+                decimal multi = website.Multiplier;
+
+                driver.Navigate().GoToUrl(url);
+                var obj = driver.ExecuteScript("return document.querySelector('script[type=\"application/ld+json\"]').text");
+                var obj2 = System.Text.Json.JsonSerializer.Deserialize<JsonNode>(obj.ToString());
+                var reviewObject = obj2["aggregateRating"]["ratingValue"].ToString();
+                decimal review;
+                review = decimal.Parse(reviewObject);
+                review = review * multi;
+                string description = obj2["description"]?.ToString() ?? obj2["name"].ToString();
+                description = WebUtility.HtmlDecode(description);
+
+                return new Movie
+                {
+                    Title = obj2["name"].ToString(),
+                    Description = description,
+                    ImageUrl = obj2["image"].ToString(),
+                    Reviews = new List<Review>
+            {
+                new Review
+                {
+                    Rating = review,
+                    Source = url,
+                    Website = website.Name
+                }
+            }
+                };
+            }
+        }
+
+        public static void CreateWebsite()
+        {
+            using (var db = new MoviesDbContext())
+            {
+                Console.Write("Enter the name of the website: ");
+                var name = Console.ReadLine();
+
+                Console.Write("Enter the multiplier of the website's reviews: ");
+                decimal.TryParse(Console.ReadLine(), out decimal multiplier);
+
+                var website = new Website { Name = name, Multiplier = multiplier };
+                db.Websites.Add(website);
+                db.SaveChanges();
+
+                Console.WriteLine($"Website {name} created successfully.");
+            }
+        }
+
+
+        private static void UpdateWebsite(int id)
+        {
+            using (var db = new MoviesDbContext())
+            {
+                var website = db.Websites.Find(id);
+
+                if (website == null)
+                {
+                    Console.WriteLine($"Website with ID {id} not found.");
+                    return;
+                }
+
+                Console.WriteLine($"Website Name: {website.Name}");
+                Console.WriteLine($"Website Multiplier: {website.Multiplier}");
+
+                Console.Write("Enter the new name of the website (leave blank to keep the existing name): ");
+                var name = Console.ReadLine();
+
+                if (!string.IsNullOrWhiteSpace(name))
+                {
+                    website.Name = name;
+                }
+
+                Console.Write("Enter the new multiplier of the website (leave blank to keep the existing multiplier): ");
+                var multiplier = Console.ReadLine();
+
+                if (!string.IsNullOrWhiteSpace(multiplier))
+                {
+                    if (decimal.TryParse(multiplier, out decimal newMultiplier))
+                    {
+                        website.Multiplier = newMultiplier;
+                    }
+                    else
+                    {
+                        Console.WriteLine("Invalid multiplier entered. The multiplier should be a decimal value.");
+                    }
+                }
+
+                db.SaveChanges();
+
+                Console.WriteLine($"Website with ID {id} updated successfully.");
+            }
+        }
+
+
+
+        public static void ReadWebsites()
+        {
+            using (var db = new MoviesDbContext())
+            {
+                var websites = db.Websites.ToList();
+
+                if (websites.Any())
+                {
+                    Console.WriteLine("List of websites:");
+                    foreach (var website in websites)
+                    {
+                        Console.WriteLine($"ID: {website.Id}, Name: {website.Name}, Multiplier: {website.Multiplier}");
+                    }
+                }
+                else
+                {
+                    Console.WriteLine("No websites found.");
+                }
+            }
+        }
+
+        public static void HandleWebsiteActions()
+        {
+            bool exitWebsiteActions = false;
+            while (!exitWebsiteActions)
+            {
+                // Display the four options for the user, plus an option to exit the program
+                Console.WriteLine("Please select an option:");
+                Console.WriteLine("1. Add a new website to the database");
+                Console.WriteLine("2. Read websites from the database");
+                Console.WriteLine("3. Update existing website in the database");
+                Console.WriteLine("4. Exit website actions");
+
+                Console.Write("Enter the number of the action you would like to perform: ");
+
                 if (int.TryParse(Console.ReadLine(), out int linkNumber))
                 {
-                    if (linkNumber > 0 && linkNumber <= links.Count)
+                    switch (linkNumber)
                     {
-                        url = links[linkNumber - 1].GetAttribute("href");
-                        return url;
+                        case 1:
+                            CreateWebsite();
+                            break;
+                        case 2:
+                            ReadWebsites();
+                            break;
+                        case 3:
+                            Console.WriteLine("Enter the ID of the website to edit:");
+                            int id = int.Parse(Console.ReadLine());
+                            UpdateWebsite(id);
+                            break;
+                        case 4:
+                            exitWebsiteActions = true;
+                            Console.WriteLine("Exiting website actions...");
+                            break;
+                        default:
+                            Console.WriteLine("Invalid option selected. Please choose a number between 1 and 4.");
+                            break;
                     }
                 }
-                Console.WriteLine("Invalid link number. Please try again.");
-            }
-
-        }
-
-        public static Movie GetStructuredDataJson(string url, string website, ChromeDriver driver)
-        {
-            decimal multi;
-            if (website.ToLower() == "imdb")
-            {
-                website = "imdb";
-                multi = 1;
-            }
-            else if (website.ToLower() == "rotten tomatoes")
-            {
-                website = "rotten tomatoes";
-                multi = 0.1m;
-            } else
-            {
-                throw new NotSupportedException("Website Invalid");
-            }
-            driver.Navigate().GoToUrl(url);
-            var obj = driver.ExecuteScript("return document.querySelector('script[type=\"application/ld+json\"]').text");
-            var obj2 = System.Text.Json.JsonSerializer.Deserialize<JsonNode>(obj.ToString());
-            var reviewObject = obj2["aggregateRating"]["ratingValue"].ToString();
-            decimal review;
-            review = decimal.Parse(reviewObject);
-            review = review * multi;
-            string description = obj2["description"]?.ToString() ?? obj2["name"].ToString();
-            description = WebUtility.HtmlDecode(description);
-
-            return new Movie
-            {
-                Title = obj2["name"].ToString(),
-                Description = description,
-                ImageUrl = obj2["image"].ToString(),
-                Reviews = new List<Review>
+                else
                 {
-                    new Review
-                    {
-                        Rating = review,
-                        Source = url,
-                        Website = website
-                    }
+                    Console.WriteLine("Invalid option selected. Please choose a number between 1 and 4.");
                 }
-            };
+            }
         }
+
     }
 }
